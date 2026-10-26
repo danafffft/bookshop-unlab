@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+<PropertyGroup><TargetFramework>net10.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+
+<ItemGroup><Content Include="../db/schema.sql" Link="schema.sql" CopyToOutputDirectory="Always" /><Content Include="../db/books.json" Link="books.json" CopyToOutputDirectory="Always" /></ItemGroup>
+</Project>
+
