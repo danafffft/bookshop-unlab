@@ -4,7 +4,7 @@ set -euo pipefail
 : "${ADMIN_EMAIL:?Set ADMIN_EMAIL in Render secrets}"
 : "${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in Render secrets}"
 export PORT="${PORT:-10000}"
-export ADDR="0.0.0.0:${PORT}"
+export ADDR=":${PORT}"
 export PUBLIC_ORIGIN="${PUBLIC_ORIGIN:-${RENDER_EXTERNAL_URL:-}}"
 : "${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN to the public HTTPS origin}"
 if [[ "$PUBLIC_ORIGIN" != https://* ]]; then
@@ -32,3 +32,4 @@ status=$?
 set -e
 if [[ "$status" -eq 0 ]]; then status=1; fi
 exit "$status"
+

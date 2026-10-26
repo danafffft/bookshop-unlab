@@ -38,7 +38,7 @@ app.Use(async(c,next)=>{
  try{
   c.Response.Headers.CacheControl="no-store";
   var publicOrigin=Environment.GetEnvironmentVariable("PUBLIC_ORIGIN");
-  if(Uri.TryCreate(publicOrigin,UriKind.Absolute,out var originUri)&&originUri.Scheme=="https"){c.Request.Scheme="https";c.Request.Host=new HostString(originUri.Authority);}
+  if(c.Request.Path.StartsWithSegments("/api/auth/google")&&Uri.TryCreate(publicOrigin,UriKind.Absolute,out var originUri)&&originUri.Scheme=="https"){c.Request.Scheme="https";c.Request.Host=new HostString(originUri.Authority);}
   if(c.Request.ContentLength>65536){c.Response.StatusCode=413;return;}
   if(c.Request.Method is not ("GET" or "HEAD" or "OPTIONS")){
    var origin=c.Request.Headers.Origin.ToString();
@@ -159,5 +159,6 @@ static class Store{
  }
  public static async Task<List<Dictionary<string,object?>>> Orders(PgConnection c,Guid? uid){var rows=uid.HasValue?await Query(c,"SELECT * FROM orders WHERE user_id=@uid ORDER BY created_at DESC",("uid",uid.Value)):await Query(c,"SELECT * FROM orders ORDER BY created_at DESC LIMIT 500");foreach(var row in rows)row["items"]=await Query(c,"SELECT * FROM order_items WHERE order_id=@id",("id",row["id"]!));return rows;}
 }
+
 
 

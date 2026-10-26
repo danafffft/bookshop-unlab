@@ -46,6 +46,7 @@ func handler() http.Handler {
 }
 func main() {
 	s := &http.Server{Addr: env("ADDR", ":"+env("PORT", "8080")), Handler: handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
-	log.Printf("Cherry Books: http://localhost%s", s.Addr)
+	log.Printf("Cherry Books listening on %s", s.Addr)
 	log.Fatal(s.ListenAndServe())
 }
+
