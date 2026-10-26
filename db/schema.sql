@@ -5,3 +5,8 @@ CREATE TABLE IF NOT EXISTS books(id uuid PRIMARY KEY,title_uk text NOT NULL,titl
 CREATE TABLE IF NOT EXISTS orders(id uuid PRIMARY KEY,user_id uuid NOT NULL REFERENCES users(id),status text NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','confirmed','shipped','completed','cancelled')),name text NOT NULL,phone text NOT NULL,city text NOT NULL,address text NOT NULL,payment text NOT NULL DEFAULT 'cod' CHECK(payment='cod'),total integer NOT NULL CHECK(total>0),created_at timestamptz NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS orders_user_date ON orders(user_id,created_at DESC);
 CREATE TABLE IF NOT EXISTS order_items(order_id uuid NOT NULL REFERENCES orders(id),book_id uuid NOT NULL REFERENCES books(id),title_uk text NOT NULL,title_en text NOT NULL,price integer NOT NULL CHECK(price>0),quantity integer NOT NULL CHECK(quantity BETWEEN 1 AND 20),PRIMARY KEY(order_id,book_id));
+ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub text;
+CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub ON users(google_sub) WHERE google_sub IS NOT NULL;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_method text NOT NULL DEFAULT 'manual';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS city_ref text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS warehouse_ref text;

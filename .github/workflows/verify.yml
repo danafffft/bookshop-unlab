@@ -1,0 +1,63 @@
+name: Verify Cherry Books
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: cherry
+          POSTGRES_PASSWORD: test-only-isolated-runner
+          POSTGRES_DB: cherryqa
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cherry -d cherryqa"
+          --health-interval 5s --health-timeout 5s --health-retries 15
+    env:
+      DATABASE_URL: Host=127.0.0.1;Port=5432;Database=cherryqa;Username=cherry;Password=test-only-isolated-runner
+      ADMIN_EMAIL: qa-admin@example.test
+      ADMIN_PASSWORD: isolated-qa-password-only-2026
+      PUBLIC_ORIGIN: http://127.0.0.1:8080
+      COOKIE_SECURE: "false"
+      ASPNETCORE_URLS: http://127.0.0.1:5080
+      API_URL: http://127.0.0.1:5080
+      ADDR: 127.0.0.1:8080
+      TEST_ONLY: "1"
+      TEST_ORIGIN: http://127.0.0.1:8080
+      TEST_ADMIN_EMAIL: qa-admin@example.test
+      TEST_ADMIN_PASSWORD: isolated-qa-password-only-2026
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Install native PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y libpq5
+      - name: Build and check
+        run: |
+          dotnet build api/CherryBooks.csproj -c Release
+          node --check web/app.js
+          (cd gateway && go test ./... && go build -o /tmp/cherry-gateway .)
+      - name: Test isolated API, stock and shipping
+        run: |
+          export WEB_ROOT="$GITHUB_WORKSPACE/web"
+          dotnet api/bin/Release/net10.0/CherryBooks.dll > /tmp/cherry-api.log 2>&1 &
+          /tmp/cherry-gateway > /tmp/cherry-gateway.log 2>&1 &
+          ready=0
+          for i in $(seq 1 45); do
+            if curl --fail --silent http://127.0.0.1:8080/api/health; then ready=1; break; fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then cat /tmp/cherry-api.log; exit 1; fi
+          node tests/integration.mjs || { tail -n 100 /tmp/cherry-api.log; exit 1; }
