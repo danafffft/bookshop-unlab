@@ -13,11 +13,11 @@ builder.Services.AddSingleton(PgDataSource.Create(connection));
 builder.Services.AddRateLimiter(o => {
  o.RejectionStatusCode=429;
  o.AddPolicy("auth",c=>RateLimitPartition.GetFixedWindowLimiter(c.Connection.RemoteIpAddress?.ToString()??"local",_=>new FixedWindowRateLimiterOptions{PermitLimit=30,Window=TimeSpan.FromMinutes(10),QueueLimit=0}));
+ o.AddPolicy("shipping",c=>RateLimitPartition.GetFixedWindowLimiter(c.Connection.RemoteIpAddress?.ToString()??"local",_=>new FixedWindowRateLimiterOptions{PermitLimit=300,Window=TimeSpan.FromMinutes(1),QueueLimit=0}));
 });
 builder.Services.AddMemoryCache();
 builder.Services.AddHttpClient("nova-poshta",c=>c.Timeout=TimeSpan.FromSeconds(12));
 builder.Services.AddSingleton<NovaPoshta>();
-GoogleAuth.Configure(builder.Services);
 var app=builder.Build();
 var db=app.Services.GetRequiredService<PgDataSource>();
 await using(var init=await db.OpenConnectionAsync()){
@@ -37,8 +37,6 @@ await using(var init=await db.OpenConnectionAsync()){
 app.Use(async(c,next)=>{
  try{
   c.Response.Headers.CacheControl="no-store";
-  var publicOrigin=Environment.GetEnvironmentVariable("PUBLIC_ORIGIN");
-  if(c.Request.Path.StartsWithSegments("/api/auth/google")&&Uri.TryCreate(publicOrigin,UriKind.Absolute,out var originUri)&&originUri.Scheme=="https"){c.Request.Scheme="https";c.Request.Host=new HostString(originUri.Authority);}
   if(c.Request.ContentLength>65536){c.Response.StatusCode=413;return;}
   if(c.Request.Method is not ("GET" or "HEAD" or "OPTIONS")){
    var origin=c.Request.Headers.Origin.ToString();
@@ -51,10 +49,8 @@ app.Use(async(c,next)=>{
  catch(Exception e){app.Logger.LogError(e,"Request failed");await Api.Error(c,500,"server_error");}
 });
 app.UseRateLimiter();
-if(GoogleAuth.Enabled)app.UseAuthentication();
-GoogleAuth.Map(app,db);
-app.MapGet("/api/shipping/nova-poshta/cities",async(string? q,NovaPoshta shipping)=>Results.Ok(await shipping.Cities((q??"").Trim())));
-app.MapGet("/api/shipping/nova-poshta/warehouses",async(string cityRef,string? q,NovaPoshta shipping)=>Results.Ok(await shipping.Warehouses(cityRef,(q??"").Trim())));
+app.MapGet("/api/shipping/nova-poshta/cities",async(string? q,NovaPoshta shipping)=>Results.Ok(await shipping.Cities((q??"").Trim()))).RequireRateLimiting("shipping");
+app.MapGet("/api/shipping/nova-poshta/warehouses",async(string cityRef,string? q,int? page,NovaPoshta shipping)=>Results.Ok(await shipping.Warehouses(cityRef,(q??"").Trim(),page??1))).RequireRateLimiting("shipping");
 app.MapGet("/api/health",async()=>{await using var c=await db.OpenConnectionAsync();await Store.Query(c,"SELECT 1 AS ok");return Results.Ok(new{status="ok"});});
 app.MapGet("/api/books",async()=>{await using var c=await db.OpenConnectionAsync();return Results.Ok(await Store.Query(c,"SELECT * FROM books WHERE active=true ORDER BY featured DESC,title_en"));});
 app.MapGet("/api/auth/me",async(HttpContext ctx)=>{await using var c=await db.OpenConnectionAsync();return Results.Ok(new{user=await Security.User(ctx,c,false)});});
@@ -73,8 +69,18 @@ app.MapPost("/api/auth/login",async(HttpContext ctx,LoginInput input)=>{
  var u=rows[0];u.Remove("passwordHash");await Security.Login(ctx,c,(Guid)u["id"]!);return Results.Ok(new{user=u});
 }).RequireRateLimiting("auth");
 app.MapPost("/api/auth/logout",async(HttpContext ctx)=>{await using var c=await db.OpenConnectionAsync();if(ctx.Request.Cookies.TryGetValue("cherry_session",out var token))await Store.Execute(c,"DELETE FROM sessions WHERE token_hash=@hash",("hash",Security.TokenHash(token)));ctx.Response.Cookies.Delete("cherry_session");return Results.Ok(new{ok=true});});
+app.MapPost("/api/admin/login",async(HttpContext ctx,LoginInput input)=>{
+ await using var c=await db.OpenConnectionAsync();
+ var rows=await Store.Query(c,"SELECT id,email,name,role,password_hash FROM users WHERE email=@email",("email",input.Email.Trim().ToLowerInvariant()));
+ var hash=rows.Count==0?Security.DummyHash:(string)rows[0]["passwordHash"]!;
+ if(!Security.Verify(input.Password,hash)||rows.Count==0||(string)rows[0]["role"]! !="admin")throw new ApiException(401,"invalid_admin_credentials");
+ var user=rows[0];user.Remove("passwordHash");await Security.Login(ctx,c,(Guid)user["id"]!);return Results.Ok(new{user});
+}).RequireRateLimiting("auth");
 app.MapGet("/api/orders",async(HttpContext ctx)=>{await using var c=await db.OpenConnectionAsync();var u=await Security.User(ctx,c);return Results.Ok(await Store.Orders(c,(Guid)u!["id"]!));});
 app.MapPost("/api/orders",async(HttpContext ctx,CheckoutInput input,NovaPoshta shipping)=>{
+ var phone=System.Text.RegularExpressions.Regex.Replace(input.Phone??"",@"[\s()\-]","");
+ if(!System.Text.RegularExpressions.Regex.IsMatch(phone,@"^(?:\+?380[0-9]{9}|0[0-9]{9})$"))throw new ApiException(400,"invalid_phone");
+ input=input with{Phone=phone.StartsWith('0')?"+38"+phone:phone.StartsWith('+')?phone:"+"+phone};
  if(input.Items is null||input.Items.Length is <1 or >40||input.Items.Any(i=>i.Quantity is <1 or >20)||input.Items.Select(i=>i.BookId).Distinct().Count()!=input.Items.Length||!Api.Text(input.Name,2,100)||!Api.Text(input.Phone,7,25)||!Api.Text(input.City,2,100)||!Api.Text(input.Address,3,250))throw new ApiException(400,"invalid_checkout");
  await using var c=await db.OpenConnectionAsync();var u=await Security.User(ctx,c);
  if(input.DeliveryMethod=="nova_poshta"){var destination=await shipping.Validate(input.CityRef,input.WarehouseRef);input=input with{City=destination.city,Address=destination.warehouse};}
@@ -102,11 +108,21 @@ app.MapPost("/api/admin/books",async(HttpContext ctx,BookInput b)=>{await using 
 app.MapGet("/api/admin/orders",async(HttpContext ctx)=>{await using var c=await db.OpenConnectionAsync();await Security.Admin(ctx,c);return Results.Ok(await Store.Orders(c,null));});
 app.MapPatch("/api/admin/orders/{id:guid}",async(HttpContext ctx,Guid id,StatusInput input)=>{
  await using var c=await db.OpenConnectionAsync();await Security.Admin(ctx,c);await using var tx=await c.BeginTransactionAsync();
- var rows=await Store.Query(c,"SELECT status FROM orders WHERE id=@id FOR UPDATE",("id",id));if(rows.Count==0)throw new ApiException(404,"not_found");var old=(string)rows[0]["status"]!;
+ var rows=await Store.Query(c,"SELECT status,tracking_number FROM orders WHERE id=@id FOR UPDATE",("id",id));if(rows.Count==0)throw new ApiException(404,"not_found");var old=(string)rows[0]["status"]!;
  var valid=old switch{"pending"=>input.Status is "confirmed" or "cancelled","confirmed"=>input.Status is "shipped" or "cancelled","shipped"=>input.Status=="completed",_=>false};
  if(!valid)throw new ApiException(409,"invalid_transition");
+ if(input.Status=="shipped"&&string.IsNullOrEmpty(rows[0]["trackingNumber"] as string))throw new ApiException(400,"tracking_required");
  if(input.Status=="cancelled")await Store.Execute(c,"UPDATE books b SET stock=b.stock+i.quantity FROM order_items i WHERE i.order_id=@id AND i.book_id=b.id",("id",id));
  await Store.Execute(c,"UPDATE orders SET status=@status WHERE id=@id",("id",id),("status",input.Status));await tx.CommitAsync();return Results.Ok(new{ok=true});
+});
+app.MapPatch("/api/admin/orders/{id:guid}/shipment",async(HttpContext ctx,Guid id,ShipmentInput input)=>{
+ await using var c=await db.OpenConnectionAsync();await Security.Admin(ctx,c);
+ if(input.TrackingNumber is null||!System.Text.RegularExpressions.Regex.IsMatch(input.TrackingNumber,@"^[0-9]{14}$"))throw new ApiException(400,"invalid_tracking");
+ await using var tx=await c.BeginTransactionAsync();
+ var rows=await Store.Query(c,"SELECT status FROM orders WHERE id=@id FOR UPDATE",("id",id));if(rows.Count==0)throw new ApiException(404,"not_found");
+ if((string)rows[0]["status"]! is not ("confirmed" or "shipped"))throw new ApiException(409,"invalid_transition");
+ await Store.Execute(c,"UPDATE orders SET tracking_number=@tracking,status='shipped' WHERE id=@id",("tracking",input.TrackingNumber),("id",id));
+ await tx.CommitAsync();return Results.Ok(new{ok=true});
 });
 app.MapPost("/api/orders/{id:guid}/cancel",async(HttpContext ctx,Guid id)=>{
  await using var c=await db.OpenConnectionAsync();var user=await Security.User(ctx,c);await using var tx=await c.BeginTransactionAsync();
@@ -123,6 +139,7 @@ record LoginInput(string Email,string Password);
 record CheckoutInput(string Name,string Phone,string City,string Address,CartItem[] Items,string DeliveryMethod="manual",string? CityRef=null,string? WarehouseRef=null);
 record CartItem(Guid BookId,int Quantity);
 record StatusInput(string Status);
+record ShipmentInput(string TrackingNumber);
 record BookInput(Guid Id,string TitleUk,string TitleEn,string AuthorUk,string AuthorEn,string Category,string Isbn,string DescriptionUk,string DescriptionEn,int Price,int Stock,int Pages,string Language,string Cover,bool Featured,bool Active=true){
  public bool Valid()=>Api.Text(TitleUk,1,200)&&Api.Text(TitleEn,1,200)&&Api.Text(AuthorUk,1,200)&&Api.Text(AuthorEn,1,200)&&new[]{"fiction","nonfiction","children","classics","fantasy"}.Contains(Category)&&Isbn.Length is 10 or 13&&Isbn.All(char.IsDigit)&&Api.Text(DescriptionUk,1,4000)&&Api.Text(DescriptionEn,1,4000)&&Price is >0 and <=10000000&&Stock is >=0 and <=100000&&Pages is >0 and <10000&&Api.Text(Language,1,50)&&(System.Text.RegularExpressions.Regex.IsMatch(Cover,@"^/covers/[0-9]{10,13}\.jpg$")||(Uri.TryCreate(Cover,UriKind.Absolute,out var uri)&&uri.Scheme=="https"&&uri.Host=="covers.openlibrary.org"));
 }

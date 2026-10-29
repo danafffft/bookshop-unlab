@@ -6,11 +6,14 @@ const base=process.env.TEST_ORIGIN||'http://localhost:8080';
 function client(){let cookie='';return async(path,method='GET',body,expected=200,origin=base)=>{const r=await fetch(base+'/api'+path,{method,headers:{...(cookie?{Cookie:cookie}:{}),...(body?{'Content-Type':'application/json'}:{}),Origin:origin},body:body?JSON.stringify(body):undefined});const text=await r.text();assert.equal(r.status,expected,`${method} ${path}: ${text}`);const set=r.headers.get('set-cookie');if(set)cookie=set.split(';')[0];return text?JSON.parse(text):null}}
 const alice=client(),bob=client(),anonymous=client();
 const password='Test-'+randomUUID();
-const initial=await anonymous('/books');assert(initial.length>=32);const providers=await anonymous('/auth/providers');assert.equal(typeof providers.google,'boolean');const book=initial.find(b=>b.stock>=2);assert(book);
+const initial=await anonymous('/books');assert(initial.length>=32);await anonymous('/auth/google','GET',undefined,404);const book=initial.find(b=>b.stock>=2);assert(book);
 await anonymous('/orders','GET',undefined,401);
 await anonymous('/admin/books','GET',undefined,401);
 await alice('/auth/register','POST',{email:randomUUID()+'@example.test',password,name:'Test Alice'});
-await bob('/auth/register','POST',{email:randomUUID()+'@example.test',password,name:'Test Bob'});
+const bobEmail=randomUUID()+'@example.test';
+await bob('/auth/register','POST',{email:bobEmail,password,name:'Test Bob'});
+await anonymous('/admin/login','POST',{email:bobEmail,password},401);
+assert.equal((await anonymous('/auth/me')).user,null,'admin login must not create a session for a customer');
 await alice('/admin/books','GET',undefined,403);
 await alice('/auth/logout','POST',undefined,403,'https://attacker.example');
 const order=await alice('/orders','POST',{name:'Test Alice',phone:'+380000000000',city:'Test city',address:'Test branch 1',items:[{bookId:book.id,quantity:2}],total:1});
@@ -24,12 +27,16 @@ await alice('/orders/'+order.id+'/cancel','POST');
 await alice('/orders/'+order.id+'/cancel','POST',undefined,409);
 assert.equal((await anonymous('/books')).find(b=>b.id===book.id).stock,book.stock,'customer cancellation restores exactly once');
 const cities=await anonymous('/shipping/nova-poshta/cities?q='+encodeURIComponent('Київ'));assert(cities.length>0);
-const warehouses=await anonymous('/shipping/nova-poshta/warehouses?cityRef='+cities[0].ref);assert(warehouses.length>0);
+const firstPage=await anonymous('/shipping/nova-poshta/warehouses?cityRef='+cities[0].ref);const warehouses=firstPage.items;assert(warehouses.length>0);assert.equal(firstPage.page,1);assert.equal(typeof firstPage.hasMore,'boolean');assert.equal(typeof warehouses[0].schedule,'object');
+await anonymous('/shipping/nova-poshta/warehouses?cityRef='+cities[0].ref+'&page=0','GET',undefined,400);
+if(firstPage.hasMore){const second=await anonymous('/shipping/nova-poshta/warehouses?cityRef='+cities[0].ref+'&page=2');assert.equal(second.page,2);assert(!second.items.some(w=>warehouses.some(first=>first.ref===w.ref)),'warehouse pages must not overlap');}
+await alice('/orders','POST',{name:'Test Alice',phone:'+380000000000',city:'Kyiv',address:'Invalid branch',deliveryMethod:'nova_poshta',cityRef:cities[0].ref,warehouseRef:'invalid',items:[{bookId:book.id,quantity:1}]},400);
+await alice('/orders','POST',{name:'Test Alice',phone:'123',city:'Kyiv',address:'Branch 1',items:[{bookId:book.id,quantity:1}]},400);
 const shipment=await alice('/orders','POST',{name:'Test Alice',phone:'+380000000000',city:cities[0].name,address:warehouses[0].name,deliveryMethod:'nova_poshta',cityRef:cities[0].ref,warehouseRef:warehouses[0].ref,items:[{bookId:book.id,quantity:1}]});
 assert((await alice('/orders')).find(o=>o.id===shipment.id).deliveryMethod==='nova_poshta');
 await alice('/orders/'+shipment.id+'/cancel','POST');
 if(process.env.TEST_ADMIN_EMAIL&&process.env.TEST_ADMIN_PASSWORD){
- const admin=client();await admin('/auth/login','POST',{email:process.env.TEST_ADMIN_EMAIL,password:process.env.TEST_ADMIN_PASSWORD});
+ const admin=client();await admin('/admin/login','POST',{email:process.env.TEST_ADMIN_EMAIL,password:process.env.TEST_ADMIN_PASSWORD});
  const adminOrder=await alice('/orders','POST',{name:'Test Alice',phone:'+380000000000',city:'Test city',address:'Test branch 1',items:[{bookId:book.id,quantity:1}]});
  await admin('/admin/orders/'+adminOrder.id,'PATCH',{status:'confirmed'});
  await admin('/admin/orders/'+adminOrder.id,'PATCH',{status:'cancelled'});
@@ -43,6 +50,17 @@ if(process.env.TEST_ADMIN_EMAIL&&process.env.TEST_ADMIN_PASSWORD){
  assert.equal(concurrent.filter(r=>r.ok).length,1,'last copy must only sell once');
  for(const r of concurrent)if(r.ok)await admin('/admin/orders/'+r.value.id,'PATCH',{status:'cancelled'});
  await admin('/admin/books/'+book.id,'PUT',original);
+ const tracked=await alice('/orders','POST',{name:'Test Alice',phone:'(050) 123-45-67',city:'Test city',address:'Test branch 1',items:[{bookId:book.id,quantity:1}]});
+ await alice('/admin/orders/'+tracked.id+'/shipment','PATCH',{trackingNumber:'20400000000000'},403);
+ await admin('/admin/orders/'+tracked.id+'/shipment','PATCH',{trackingNumber:'20400000000000'},409);
+ await admin('/admin/orders/'+tracked.id,'PATCH',{status:'confirmed'});
+ await admin('/admin/orders/'+tracked.id,'PATCH',{status:'shipped'},400);
+ await admin('/admin/orders/'+tracked.id+'/shipment','PATCH',{trackingNumber:'bad'},400);
+ await admin('/admin/orders/'+tracked.id+'/shipment','PATCH',{trackingNumber:'20400000000000'});
+ const shipped=(await alice('/orders')).find(o=>o.id===tracked.id);assert.equal(shipped.status,'shipped');assert.equal(shipped.trackingNumber,'20400000000000');assert.equal(shipped.phone,'+380501234567');
+ await alice('/orders/'+tracked.id+'/cancel','POST',undefined,409);
+ await admin('/admin/orders/'+tracked.id,'PATCH',{status:'completed'});
+ await admin('/admin/orders/'+tracked.id+'/shipment','PATCH',{trackingNumber:'20400000000001'},409);
 }
 await alice('/auth/logout','POST');await alice('/orders','GET',undefined,401);
 console.log('PASS: registration, sessions, CSRF, permissions, order privacy, authoritative pricing, stock transaction, customer cancellation, live Nova Poshta directory and warehouse validation, logout. Admin cancellation and last-copy concurrency run when admin credentials are supplied.');

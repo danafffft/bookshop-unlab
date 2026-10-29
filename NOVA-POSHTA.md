@@ -1,9 +1,11 @@
-# Nova Poshta integration
+# Доставка Новою поштою
 
-The server calls the official https://api.novaposhta.ua/v2.0/json/ endpoint. Cities and branches are fetched with Address/getCities and Address/getWarehouses, cached for 15 minutes, and served to the browser without exposing an API key. These directory methods were verified without a key on 2026-10-26. If Nova Poshta requires a key for the account or changes access, add NOVA_POSHTA_API_KEY to Render's server environment.
+Сервер викликає офіційний HTTPS API https://api.novaposhta.ua/v2.0/json/ — Address/getCities та Address/getWarehouses. Ключ NOVA_POSHTA_API_KEY можна додати в секрети Render; довідники перевірено без ключа. Результати кешуються 15 хвилин, пошук обмежено за частотою.
 
-Checkout stores the selected city and branch references with the order. The server checks the selected branch against the carrier's directory and uses the carrier's city and address, rather than trusting text sent by the browser.
+Покупець вибирає місто і пункт отримання з API. Пошук за номером або вулицею та кнопка «Показати ще» завантажують сторінки по 30 пунктів. Адреса й графік беруться з відповіді перевізника. Зміна міста або пошуку скидає старий вибір, запізнілі відповіді ігноруються. Сервер повторно перевіряє відповідність CityRef і WarehouseRef перед збереженням замовлення.
 
-Delivery cost is not invented and is not included in the book total. The recipient pays the applicable carrier tariff. Shipping labels are created manually by the seller after confirmation. Automated label creation requires sender account details, a valid account API key, parcel dimensions/weight and a separate shipping-label action; it is not silently executed when an order is placed.
+Телефон приймається у форматі +380XXXXXXXXX або 0XXXXXXXXX; пробіли, дужки й дефіси дозволені. Зберігається нормалізований +380-формат.
 
-Official provider information: https://novaposhta.ua/for-business/cooperation/integration/ . API key creation is available in the business account settings under Security.
+Доставка й комісія післяплати оплачуються окремо за тарифами перевізника. Накладна не генерується автоматично: адміністратор створює її у кабінеті Нової пошти, а потім додає номер у магазині. Перевіряється формат номера (14 цифр), не існування накладної. Додавання дозволене для підтвердженого чи вже відправленого замовлення. Покупець бачить номер і посилання https://novaposhta.ua/tracking/ .
+
+Скасування покупцем доступне до відправлення, залишки повертаються один раз у транзакції.

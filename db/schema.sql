@@ -10,3 +10,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub ON users(google_sub) WHERE go
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_method text NOT NULL DEFAULT 'manual';
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS city_ref text;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS warehouse_ref text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS tracking_number text;
