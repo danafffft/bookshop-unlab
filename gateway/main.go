@@ -41,6 +41,8 @@ func handler() http.Handler {
 			w.WriteHeader(405)
 			return
 		}
+		// Revalidate application files so a new HTML page never runs stale JS.
+		w.Header().Set("Cache-Control", "no-cache")
 		files.ServeHTTP(w, r)
 	})
 }
